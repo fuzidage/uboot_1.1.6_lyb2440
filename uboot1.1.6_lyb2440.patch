@@ -1,0 +1,1510 @@
+diff -urN u-boot-1.1.6/board/lyb2440/config.mk u-boot-1.1.6_lyb2440/board/lyb2440/config.mk
+--- u-boot-1.1.6/board/lyb2440/config.mk	1969-12-31 16:00:00.000000000 -0800
++++ u-boot-1.1.6_lyb2440/board/lyb2440/config.mk	2019-11-22 03:29:08.246004511 -0800
+@@ -0,0 +1,25 @@
++#
++# (C) Copyright 2002
++# Gary Jennejohn, DENX Software Engineering, <gj@denx.de>
++# David Mueller, ELSOFT AG, <d.mueller@elsoft.ch>
++#
++# SAMSUNG SMDK2410 board with S3C2410X (ARM920T) cpu
++#
++# see http://www.samsung.com/ for more information on SAMSUNG
++#
++
++#
++# SMDK2410 has 1 bank of 64 MB DRAM
++#
++# 3000'0000 to 3400'0000
++#
++# Linux-Kernel is expected to be at 3000'8000, entry 3000'8000
++# optionally with a ramdisk at 3080'0000
++#
++# we load ourself to 33F8'0000
++#
++# download area is 3300'0000
++#
++
++
++TEXT_BASE = 0x33F80000
+diff -urN u-boot-1.1.6/board/lyb2440/flash.c u-boot-1.1.6_lyb2440/board/lyb2440/flash.c
+--- u-boot-1.1.6/board/lyb2440/flash.c	1969-12-31 16:00:00.000000000 -0800
++++ u-boot-1.1.6_lyb2440/board/lyb2440/flash.c	2019-11-22 03:29:08.246004511 -0800
+@@ -0,0 +1,433 @@
++/*
++ * (C) Copyright 2002
++ * Sysgo Real-Time Solutions, GmbH <www.elinos.com>
++ * Alex Zuepke <azu@sysgo.de>
++ *
++ * See file CREDITS for list of people who contributed to this
++ * project.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston,
++ * MA 02111-1307 USA
++ */
++
++#include <common.h>
++
++ulong myflush (void);
++
++
++#define FLASH_BANK_SIZE	PHYS_FLASH_SIZE
++#define MAIN_SECT_SIZE  0x10000	/* 64 KB */
++
++flash_info_t flash_info[CFG_MAX_FLASH_BANKS];
++
++
++#define CMD_READ_ARRAY		0x000000F0
++#define CMD_UNLOCK1		0x000000AA
++#define CMD_UNLOCK2		0x00000055
++#define CMD_ERASE_SETUP		0x00000080
++#define CMD_ERASE_CONFIRM	0x00000030
++#define CMD_PROGRAM		0x000000A0
++#define CMD_UNLOCK_BYPASS	0x00000020
++
++#define MEM_FLASH_ADDR1		(*(volatile u16 *)(CFG_FLASH_BASE + (0x00000555 << 1)))
++#define MEM_FLASH_ADDR2		(*(volatile u16 *)(CFG_FLASH_BASE + (0x000002AA << 1)))
++
++#define BIT_ERASE_DONE		0x00000080
++#define BIT_RDY_MASK		0x00000080
++#define BIT_PROGRAM_ERROR	0x00000020
++#define BIT_TIMEOUT		0x80000000	/* our flag */
++
++#define READY 1
++#define ERR   2
++#define TMO   4
++
++/*-----------------------------------------------------------------------
++ */
++
++ulong flash_init (void)
++{
++	int i, j;
++	ulong size = 0;
++
++	for (i = 0; i < CFG_MAX_FLASH_BANKS; i++) {
++		ulong flashbase = 0;
++
++		flash_info[i].flash_id =
++#if defined(CONFIG_AMD_LV400)
++			(AMD_MANUFACT & FLASH_VENDMASK) |
++			(AMD_ID_LV400B & FLASH_TYPEMASK);
++#elif defined(CONFIG_AMD_LV800)
++			(AMD_MANUFACT & FLASH_VENDMASK) |
++			(AMD_ID_LV800B & FLASH_TYPEMASK);
++#else
++#error "Unknown flash configured"
++#endif
++			flash_info[i].size = FLASH_BANK_SIZE;
++		flash_info[i].sector_count = CFG_MAX_FLASH_SECT;
++		memset (flash_info[i].protect, 0, CFG_MAX_FLASH_SECT);
++		if (i == 0)
++			flashbase = PHYS_FLASH_1;
++		else
++			panic ("configured too many flash banks!\n");
++		for (j = 0; j < flash_info[i].sector_count; j++) {
++			if (j <= 3) {
++				/* 1st one is 16 KB */
++				if (j == 0) {
++					flash_info[i].start[j] =
++						flashbase + 0;
++				}
++
++				/* 2nd and 3rd are both 8 KB */
++				if ((j == 1) || (j == 2)) {
++					flash_info[i].start[j] =
++						flashbase + 0x4000 + (j -
++								      1) *
++						0x2000;
++				}
++
++				/* 4th 32 KB */
++				if (j == 3) {
++					flash_info[i].start[j] =
++						flashbase + 0x8000;
++				}
++			} else {
++				flash_info[i].start[j] =
++					flashbase + (j - 3) * MAIN_SECT_SIZE;
++			}
++		}
++		size += flash_info[i].size;
++	}
++
++	flash_protect (FLAG_PROTECT_SET,
++		       CFG_FLASH_BASE,
++		       CFG_FLASH_BASE + monitor_flash_len - 1,
++		       &flash_info[0]);
++
++	flash_protect (FLAG_PROTECT_SET,
++		       CFG_ENV_ADDR,
++		       CFG_ENV_ADDR + CFG_ENV_SIZE - 1, &flash_info[0]);
++
++	return size;
++}
++
++/*-----------------------------------------------------------------------
++ */
++void flash_print_info (flash_info_t * info)
++{
++	int i;
++
++	switch (info->flash_id & FLASH_VENDMASK) {
++	case (AMD_MANUFACT & FLASH_VENDMASK):
++		printf ("AMD: ");
++		break;
++	default:
++		printf ("Unknown Vendor ");
++		break;
++	}
++
++	switch (info->flash_id & FLASH_TYPEMASK) {
++	case (AMD_ID_LV400B & FLASH_TYPEMASK):
++		printf ("1x Amd29LV400BB (4Mbit)\n");
++		break;
++	case (AMD_ID_LV800B & FLASH_TYPEMASK):
++		printf ("1x Amd29LV800BB (8Mbit)\n");
++		break;
++	default:
++		printf ("Unknown Chip Type\n");
++		goto Done;
++		break;
++	}
++
++	printf ("  Size: %ld MB in %d Sectors\n",
++		info->size >> 20, info->sector_count);
++
++	printf ("  Sector Start Addresses:");
++	for (i = 0; i < info->sector_count; i++) {
++		if ((i % 5) == 0) {
++			printf ("\n   ");
++		}
++		printf (" %08lX%s", info->start[i],
++			info->protect[i] ? " (RO)" : "     ");
++	}
++	printf ("\n");
++
++      Done:;
++}
++
++/*-----------------------------------------------------------------------
++ */
++
++int flash_erase (flash_info_t * info, int s_first, int s_last)
++{
++	ushort result;
++	int iflag, cflag, prot, sect;
++	int rc = ERR_OK;
++	int chip;
++
++	/* first look for protection bits */
++
++	if (info->flash_id == FLASH_UNKNOWN)
++		return ERR_UNKNOWN_FLASH_TYPE;
++
++	if ((s_first < 0) || (s_first > s_last)) {
++		return ERR_INVAL;
++	}
++
++	if ((info->flash_id & FLASH_VENDMASK) !=
++	    (AMD_MANUFACT & FLASH_VENDMASK)) {
++		return ERR_UNKNOWN_FLASH_VENDOR;
++	}
++
++	prot = 0;
++	for (sect = s_first; sect <= s_last; ++sect) {
++		if (info->protect[sect]) {
++			prot++;
++		}
++	}
++	if (prot)
++		return ERR_PROTECTED;
++
++	/*
++	 * Disable interrupts which might cause a timeout
++	 * here. Remember that our exception vectors are
++	 * at address 0 in the flash, and we don't want a
++	 * (ticker) exception to happen while the flash
++	 * chip is in programming mode.
++	 */
++	cflag = icache_status ();
++	icache_disable ();
++	iflag = disable_interrupts ();
++
++	/* Start erase on unprotected sectors */
++	for (sect = s_first; sect <= s_last && !ctrlc (); sect++) {
++		printf ("Erasing sector %2d ... ", sect);
++
++		/* arm simple, non interrupt dependent timer */
++		reset_timer_masked ();
++
++		if (info->protect[sect] == 0) {	/* not protected */
++			vu_short *addr = (vu_short *) (info->start[sect]);
++
++			MEM_FLASH_ADDR1 = CMD_UNLOCK1;
++			MEM_FLASH_ADDR2 = CMD_UNLOCK2;
++			MEM_FLASH_ADDR1 = CMD_ERASE_SETUP;
++
++			MEM_FLASH_ADDR1 = CMD_UNLOCK1;
++			MEM_FLASH_ADDR2 = CMD_UNLOCK2;
++			*addr = CMD_ERASE_CONFIRM;
++
++			/* wait until flash is ready */
++			chip = 0;
++
++			do {
++				result = *addr;
++
++				/* check timeout */
++				if (get_timer_masked () >
++				    CFG_FLASH_ERASE_TOUT) {
++					MEM_FLASH_ADDR1 = CMD_READ_ARRAY;
++					chip = TMO;
++					break;
++				}
++
++				if (!chip
++				    && (result & 0xFFFF) & BIT_ERASE_DONE)
++					chip = READY;
++
++				if (!chip
++				    && (result & 0xFFFF) & BIT_PROGRAM_ERROR)
++					chip = ERR;
++
++			} while (!chip);
++
++			MEM_FLASH_ADDR1 = CMD_READ_ARRAY;
++
++			if (chip == ERR) {
++				rc = ERR_PROG_ERROR;
++				goto outahere;
++			}
++			if (chip == TMO) {
++				rc = ERR_TIMOUT;
++				goto outahere;
++			}
++
++			printf ("ok.\n");
++		} else {	/* it was protected */
++
++			printf ("protected!\n");
++		}
++	}
++
++	if (ctrlc ())
++		printf ("User Interrupt!\n");
++
++      outahere:
++	/* allow flash to settle - wait 10 ms */
++	udelay_masked (10000);
++
++	if (iflag)
++		enable_interrupts ();
++
++	if (cflag)
++		icache_enable ();
++
++	return rc;
++}
++
++/*-----------------------------------------------------------------------
++ * Copy memory to flash
++ */
++
++volatile static int write_hword (flash_info_t * info, ulong dest, ushort data)
++{
++	vu_short *addr = (vu_short *) dest;
++	ushort result;
++	int rc = ERR_OK;
++	int cflag, iflag;
++	int chip;
++
++	/*
++	 * Check if Flash is (sufficiently) erased
++	 */
++	result = *addr;
++	if ((result & data) != data)
++		return ERR_NOT_ERASED;
++
++
++	/*
++	 * Disable interrupts which might cause a timeout
++	 * here. Remember that our exception vectors are
++	 * at address 0 in the flash, and we don't want a
++	 * (ticker) exception to happen while the flash
++	 * chip is in programming mode.
++	 */
++	cflag = icache_status ();
++	icache_disable ();
++	iflag = disable_interrupts ();
++
++	MEM_FLASH_ADDR1 = CMD_UNLOCK1;
++	MEM_FLASH_ADDR2 = CMD_UNLOCK2;
++	MEM_FLASH_ADDR1 = CMD_UNLOCK_BYPASS;
++	*addr = CMD_PROGRAM;
++	*addr = data;
++
++	/* arm simple, non interrupt dependent timer */
++	reset_timer_masked ();
++
++	/* wait until flash is ready */
++	chip = 0;
++	do {
++		result = *addr;
++
++		/* check timeout */
++		if (get_timer_masked () > CFG_FLASH_ERASE_TOUT) {
++			chip = ERR | TMO;
++			break;
++		}
++		if (!chip && ((result & 0x80) == (data & 0x80)))
++			chip = READY;
++
++		if (!chip && ((result & 0xFFFF) & BIT_PROGRAM_ERROR)) {
++			result = *addr;
++
++			if ((result & 0x80) == (data & 0x80))
++				chip = READY;
++			else
++				chip = ERR;
++		}
++
++	} while (!chip);
++
++	*addr = CMD_READ_ARRAY;
++
++	if (chip == ERR || *addr != data)
++		rc = ERR_PROG_ERROR;
++
++	if (iflag)
++		enable_interrupts ();
++
++	if (cflag)
++		icache_enable ();
++
++	return rc;
++}
++
++/*-----------------------------------------------------------------------
++ * Copy memory to flash.
++ */
++
++int write_buff (flash_info_t * info, uchar * src, ulong addr, ulong cnt)
++{
++	ulong cp, wp;
++	int l;
++	int i, rc;
++	ushort data;
++
++	wp = (addr & ~1);	/* get lower word aligned address */
++
++	/*
++	 * handle unaligned start bytes
++	 */
++	if ((l = addr - wp) != 0) {
++		data = 0;
++		for (i = 0, cp = wp; i < l; ++i, ++cp) {
++			data = (data >> 8) | (*(uchar *) cp << 8);
++		}
++		for (; i < 2 && cnt > 0; ++i) {
++			data = (data >> 8) | (*src++ << 8);
++			--cnt;
++			++cp;
++		}
++		for (; cnt == 0 && i < 2; ++i, ++cp) {
++			data = (data >> 8) | (*(uchar *) cp << 8);
++		}
++
++		if ((rc = write_hword (info, wp, data)) != 0) {
++			return (rc);
++		}
++		wp += 2;
++	}
++
++	/*
++	 * handle word aligned part
++	 */
++	while (cnt >= 2) {
++		data = *((vu_short *) src);
++		if ((rc = write_hword (info, wp, data)) != 0) {
++			return (rc);
++		}
++		src += 2;
++		wp += 2;
++		cnt -= 2;
++	}
++
++	if (cnt == 0) {
++		return ERR_OK;
++	}
++
++	/*
++	 * handle unaligned tail bytes
++	 */
++	data = 0;
++	for (i = 0, cp = wp; i < 2 && cnt > 0; ++i, ++cp) {
++		data = (data >> 8) | (*src++ << 8);
++		--cnt;
++	}
++	for (; i < 2; ++i, ++cp) {
++		data = (data >> 8) | (*(uchar *) cp << 8);
++	}
++
++	return write_hword (info, wp, data);
++}
+diff -urN u-boot-1.1.6/board/lyb2440/lowlevel_init.S u-boot-1.1.6_lyb2440/board/lyb2440/lowlevel_init.S
+--- u-boot-1.1.6/board/lyb2440/lowlevel_init.S	1969-12-31 16:00:00.000000000 -0800
++++ u-boot-1.1.6_lyb2440/board/lyb2440/lowlevel_init.S	2019-11-22 03:29:08.246004511 -0800
+@@ -0,0 +1,168 @@
++/*
++ * Memory Setup stuff - taken from blob memsetup.S
++ *
++ * Copyright (C) 1999 2000 2001 Erik Mouw (J.A.K.Mouw@its.tudelft.nl) and
++ *                     Jan-Derk Bakker (J.D.Bakker@its.tudelft.nl)
++ *
++ * Modified for the Samsung SMDK2410 by
++ * (C) Copyright 2002
++ * David Mueller, ELSOFT AG, <d.mueller@elsoft.ch>
++ *
++ * See file CREDITS for list of people who contributed to this
++ * project.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston,
++ * MA 02111-1307 USA
++ */
++
++
++#include <config.h>
++#include <version.h>
++
++
++/* some parameters for the board */
++
++/*
++ *
++ * Taken from linux/arch/arm/boot/compressed/head-s3c2410.S
++ *
++ * Copyright (C) 2002 Samsung Electronics SW.LEE  <hitchcar@sec.samsung.com>
++ *
++ */
++/*内存控制器相关设置*/
++#define BWSCON	0x48000000
++
++/* BWSCON */
++#define DW8		 	(0x0)
++#define DW16		 	(0x1)
++#define DW32		 	(0x2)
++#define WAIT		 	(0x1<<2)
++#define UBLB		 	(0x1<<3)
++
++#define B1_BWSCON	  	(DW16)
++#define B2_BWSCON	  	(DW16)
++//#define B3_BWSCON	  	(DW16 + WAIT + UBLB)
++#define B3_BWSCON	  	(DW16 + UBLB)		//10m网卡CS8900A
++#define B4_BWSCON	  	(DW16 + WAIT + UBLB)	//网卡dm9000
++#define B5_BWSCON	  	(DW8)			//扩展串口
++#define B6_BWSCON	  	(DW32)			//sdram
++#define B7_BWSCON	  	(DW32)
++
++/* BANK0CON */
++#define B0_Tacs		 	0x0	/*  0clk */
++#define B0_Tcos		 	0x0	/*  0clk */
++#define B0_Tacc		 	0x7	/* 14clk */
++#define B0_Tcoh		 	0x0	/*  0clk */
++#define B0_Tah		 	0x0	/*  0clk */
++#define B0_Tacp		 	0x0
++#define B0_PMC		 	0x0	/* normal */
++
++/* BANK1CON */
++#define B1_Tacs		 	0x0	/*  0clk */
++#define B1_Tcos		 	0x0	/*  0clk */
++#define B1_Tacc		 	0x7	/* 14clk */
++#define B1_Tcoh		 	0x0	/*  0clk */
++#define B1_Tah		 	0x0	/*  0clk */
++#define B1_Tacp		 	0x0
++#define B1_PMC		 	0x0
++
++#define B2_Tacs		 	0x0
++#define B2_Tcos		 	0x0
++#define B2_Tacc		 	0x7
++#define B2_Tcoh		 	0x0
++#define B2_Tah		 	0x0
++#define B2_Tacp		 	0x0
++#define B2_PMC		 	0x0
++
++#define B3_Tacs		 	0x0	/*  0clk */
++#define B3_Tcos		 	0x3	/*  4clk */
++#define B3_Tacc		 	0x7	/* 14clk */
++#define B3_Tcoh		 	0x1	/*  1clk */
++#define B3_Tah		 	0x0	/*  0clk */
++#define B3_Tacp		 	0x3     /*  6clk */
++#define B3_PMC		 	0x0	/* normal */
++
++#define B4_Tacs		 	0x0	/*  0clk DM9000*/
++#define B4_Tcos		 	0x3	/*  4clk */
++#define B4_Tacc		 	0x7	/* 14clk */
++#define B4_Tcoh		 	0x1	/*  1clk */
++#define B4_Tah		 	0x3	/*  4clk */
++#define B4_Tacp		 	0x6 	/*  6clk */
++#define B4_PMC		 	0x0	/* normal */
++
++#define B5_Tacs		 	0x0	/*  0clk */
++#define B5_Tcos		 	0x0	/*  0clk */
++#define B5_Tacc		 	0x7	/* 14clk */
++#define B5_Tcoh		 	0x0	/*  0clk */
++#define B5_Tah		 	0x0	/*  0clk */
++#define B5_Tacp		 	0x0
++#define B5_PMC		 	0x0	/* normal */
++
++#define B6_MT		 	0x3	/* SDRAM */
++#define B6_Trcd	 	 	0x1
++#define B6_SCAN		 	0x1	/* 9bit */
++
++#define B7_MT		 	0x3	/* SDRAM */
++#define B7_Trcd		 	0x1	/* 3clk */
++#define B7_SCAN		 	0x1	/* 9bit */
++
++/* REFRESH parameter */
++#define REFEN		 	0x1	/* Refresh enable */
++#define TREFMD		 	0x0	/* CBR(CAS before RAS)/Auto refresh */
++#define Trp			0x0	/* 2clk */
++#define Trc			0x3	/* 7clk */
++#define Tchr		 	0x2	/* 3clk */
++#define REFCNT		 	0x4f4	/* period=7.8125us, HCLK=100Mhz, (2048+1-7.8125*100) 根据sdram的刷新性能配置*/
++/**************************************/
++
++_TEXT_BASE:
++	.word	TEXT_BASE
++
++.globl lowlevel_init
++lowlevel_init:
++	/* memory control configuration */
++	/* make r0 relative the current location so that it */
++	/* reads SMRDATA out of FLASH rather than memory ! */
++	ldr     r0, =SMRDATA
++	ldr	r1, _TEXT_BASE
++	sub	r0, r0, r1
++	ldr	r1, =BWSCON	/* Bus Width Status Controller */
++	add     r2, r0, #13*4
++0:
++	ldr     r3, [r0], #4
++	str     r3, [r1], #4
++	cmp     r2, r0
++	bne     0b
++
++	/* everything is fine now */
++	mov	pc, lr
++
++	.ltorg
++/* the literal pools origin */
++
++SMRDATA:
++    .word (0+(B1_BWSCON<<4)+(B2_BWSCON<<8)+(B3_BWSCON<<12)+(B4_BWSCON<<16)+(B5_BWSCON<<20)+(B6_BWSCON<<24)+(B7_BWSCON<<28))
++    .word ((B0_Tacs<<13)+(B0_Tcos<<11)+(B0_Tacc<<8)+(B0_Tcoh<<6)+(B0_Tah<<4)+(B0_Tacp<<2)+(B0_PMC))
++    .word ((B1_Tacs<<13)+(B1_Tcos<<11)+(B1_Tacc<<8)+(B1_Tcoh<<6)+(B1_Tah<<4)+(B1_Tacp<<2)+(B1_PMC))
++    .word ((B2_Tacs<<13)+(B2_Tcos<<11)+(B2_Tacc<<8)+(B2_Tcoh<<6)+(B2_Tah<<4)+(B2_Tacp<<2)+(B2_PMC))
++    .word ((B3_Tacs<<13)+(B3_Tcos<<11)+(B3_Tacc<<8)+(B3_Tcoh<<6)+(B3_Tah<<4)+(B3_Tacp<<2)+(B3_PMC))
++    .word ((B4_Tacs<<13)+(B4_Tcos<<11)+(B4_Tacc<<8)+(B4_Tcoh<<6)+(B4_Tah<<4)+(B4_Tacp<<2)+(B4_PMC))
++    .word ((B5_Tacs<<13)+(B5_Tcos<<11)+(B5_Tacc<<8)+(B5_Tcoh<<6)+(B5_Tah<<4)+(B5_Tacp<<2)+(B5_PMC))
++    .word ((B6_MT<<15)+(B6_Trcd<<2)+(B6_SCAN))
++    .word ((B7_MT<<15)+(B7_Trcd<<2)+(B7_SCAN))
++    .word ((REFEN<<23)+(TREFMD<<22)+(Trp<<20)+(Trc<<18)+(Tchr<<16)+REFCNT)
++    .word 0xb1		//BANKSIZE
++    .word 0x30
++    .word 0x30
+diff -urN u-boot-1.1.6/board/lyb2440/lyb2440.c u-boot-1.1.6_lyb2440/board/lyb2440/lyb2440.c
+--- u-boot-1.1.6/board/lyb2440/lyb2440.c	1969-12-31 16:00:00.000000000 -0800
++++ u-boot-1.1.6_lyb2440/board/lyb2440/lyb2440.c	2019-11-24 00:09:32.779786538 -0800
+@@ -0,0 +1,141 @@
++/*
++ * (C) Copyright 2002
++ * Sysgo Real-Time Solutions, GmbH <www.elinos.com>
++ * Marius Groeger <mgroeger@sysgo.de>
++ *
++ * (C) Copyright 2002
++ * David Mueller, ELSOFT AG, <d.mueller@elsoft.ch>
++ *
++ * See file CREDITS for list of people who contributed to this
++ * project.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston,
++ * MA 02111-1307 USA
++ */
++
++#include <common.h>
++#include <s3c2410.h>
++
++DECLARE_GLOBAL_DATA_PTR;
++
++#define FCLK_SPEED 1
++
++#if FCLK_SPEED==0		/* Fout = 203MHz, Fin = 12MHz for Audio */
++#define M_MDIV	0xC3
++#define M_PDIV	0x4
++#define M_SDIV	0x1
++#elif FCLK_SPEED==1		/* Fout = 202.8MHz */
++#define M_MDIV	0xA1
++#define M_PDIV	0x3
++#define M_SDIV	0x1
++#endif
++
++#define USB_CLOCK 1
++
++#if USB_CLOCK==0
++#define U_M_MDIV	0xA1
++#define U_M_PDIV	0x3
++#define U_M_SDIV	0x1
++#elif USB_CLOCK==1
++#define U_M_MDIV	0x48
++#define U_M_PDIV	0x3
++#define U_M_SDIV	0x2
++#endif
++
++static inline void delay (unsigned long loops)
++{
++	__asm__ volatile ("1:\n"
++	  "subs %0, %1, #1\n"
++	  "bne 1b":"=r" (loops):"0" (loops));
++}
++
++/*
++ * Miscellaneous platform dependent initialisations
++ */
++#define S3C2440_MPLL_400MHZ 	((0x5c<<12)|(0x02<<4)|(0x01))  //HJ 400MHZ
++//#define S3C2440_UPLL_48MHZ  	((0x38<<12)|(0x02<<4)|(0x02))   //HJ 100MHZ
++#define S3C2440_CLKDIV      	0x05
++
++int board_init (void)
++{
++	S3C24X0_CLOCK_POWER * const clk_power = S3C24X0_GetBase_CLOCK_POWER();
++	S3C24X0_GPIO * const gpio = S3C24X0_GetBase_GPIO();
++
++	clk_power->CLKDIVN = S3C2440_CLKDIV;
++	
++	/* change to asynchronous bus mode */
++		__asm__( "mrc p15, 0, r1, c1, c0, 0\n"
++				"orr r1, r1, #0xc0000000\n"
++				"mcr p15, 0, r1, c1, c0, 0\n"
++				:::"r1"
++				);
++
++	/* to reduce PLL lock time, adjust the LOCKTIME register */
++	clk_power->LOCKTIME = 0xFFFFFF;
++
++	/* configure MPLL */
++	//clk_power->MPLLCON = ((M_MDIV << 12) + (M_PDIV << 4) + M_SDIV);
++	clk_power->MPLLCON = S3C2440_MPLL_400MHZ;
++	
++	/* some delay between MPLL and UPLL */
++	delay (4000);
++
++	/* configure UPLL */
++	//clk_power->UPLLCON = ((U_M_MDIV << 12) + (U_M_PDIV << 4) + U_M_SDIV);
++	//clk_power->UPLLCON = S3C2440_UPLL_48MHZ;
++	
++	/* some delay between MPLL and UPLL */
++	delay (8000);
++
++	/* set up the I/O ports */
++	gpio->GPACON = 0x007FFFFF;
++	gpio->GPBCON = 0x00044555;
++	gpio->GPBUP = 0x000007FF;
++	gpio->GPCCON = 0xAAAAAAAA;
++	gpio->GPCUP = 0x0000FFFF;
++	gpio->GPDCON = 0xAAAAAAAA;
++	gpio->GPDUP = 0x0000FFFF;
++	gpio->GPECON = 0xAAAAAAAA;
++	gpio->GPEUP = 0x0000FFFF;
++	gpio->GPFCON = 0x000055AA;
++	gpio->GPFUP = 0x000000FF;
++	gpio->GPGCON = 0xFF95FFBA;
++	gpio->GPGUP = 0x0000FFFF;
++	gpio->GPHCON = 0x002AFAAA;
++	gpio->GPHUP = 0x000007FF;
++
++	/* arch number of SMDK2410-Board */
++	gd->bd->bi_arch_number = MACH_TYPE_SMDK2440;
++
++	/* adress of boot parameters */
++	gd->bd->bi_boot_params = 0x30000100;
++
++	icache_enable();
++	dcache_enable();
++/*
++	gpio->GPFCON &= ~((3<<8) | (3<<10) | (3<<12));
++	gpio->GPFCON |=  ((1<<8) | (1<<10) | (1<<12));
++	gpio->GPFDAT &= ~(7<<4);
++*/
++	return 0;
++}
++
++int dram_init (void)
++{
++	gd->bd->bi_dram[0].start = PHYS_SDRAM_1;
++	gd->bd->bi_dram[0].size = PHYS_SDRAM_1_SIZE;
++
++	return 0;
++}
+diff -urN u-boot-1.1.6/board/lyb2440/Makefile u-boot-1.1.6_lyb2440/board/lyb2440/Makefile
+--- u-boot-1.1.6/board/lyb2440/Makefile	1969-12-31 16:00:00.000000000 -0800
++++ u-boot-1.1.6_lyb2440/board/lyb2440/Makefile	2019-11-23 00:05:15.889578774 -0800
+@@ -0,0 +1,51 @@
++#
++# (C) Copyright 2000-2006
++# Wolfgang Denk, DENX Software Engineering, wd@denx.de.
++#
++# See file CREDITS for list of people who contributed to this
++# project.
++#
++# This program is free software; you can redistribute it and/or
++# modify it under the terms of the GNU General Public License as
++# published by the Free Software Foundation; either version 2 of
++# the License, or (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 59 Temple Place, Suite 330, Boston,
++# MA 02111-1307 USA
++#
++
++include $(TOPDIR)/config.mk
++
++LIB	= $(obj)lib$(BOARD).a
++
++COBJS	:= lyb2440.o flash.o
++SOBJS	:= lowlevel_init.o
++
++SRCS	:= $(SOBJS:.o=.S) $(COBJS:.o=.c)
++OBJS	:= $(addprefix $(obj),$(COBJS))
++SOBJS	:= $(addprefix $(obj),$(SOBJS))
++
++$(LIB):	$(obj).depend $(OBJS) $(SOBJS)
++	$(AR) $(ARFLAGS) $@ $(OBJS) $(SOBJS)
++
++clean:
++	rm -f $(SOBJS) $(OBJS)
++
++distclean:	clean
++	rm -f $(LIB) core *.bak .depend
++
++#########################################################################
++
++# defines $(obj).depend target
++include $(SRCTREE)/rules.mk
++
++sinclude $(obj).depend
++
++#########################################################################
+diff -urN u-boot-1.1.6/board/lyb2440/u-boot.lds u-boot-1.1.6_lyb2440/board/lyb2440/u-boot.lds
+--- u-boot-1.1.6/board/lyb2440/u-boot.lds	1969-12-31 16:00:00.000000000 -0800
++++ u-boot-1.1.6_lyb2440/board/lyb2440/u-boot.lds	2019-11-22 03:29:08.246004511 -0800
+@@ -0,0 +1,57 @@
++/*
++ * (C) Copyright 2002
++ * Gary Jennejohn, DENX Software Engineering, <gj@denx.de>
++ *
++ * See file CREDITS for list of people who contributed to this
++ * project.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston,
++ * MA 02111-1307 USA
++ */
++
++OUTPUT_FORMAT("elf32-littlearm", "elf32-littlearm", "elf32-littlearm")
++/*OUTPUT_FORMAT("elf32-arm", "elf32-arm", "elf32-arm")*/
++OUTPUT_ARCH(arm)
++ENTRY(_start)
++SECTIONS
++{
++	. = 0x00000000;
++
++	. = ALIGN(4);
++	.text      :
++	{
++	  cpu/arm920t/start.o	(.text)
++	  *(.text)
++	}
++
++	. = ALIGN(4);
++	.rodata : { *(.rodata) }
++
++	. = ALIGN(4);
++	.data : { *(.data) }
++
++	. = ALIGN(4);
++	.got : { *(.got) }
++
++	. = .;
++	__u_boot_cmd_start = .;
++	.u_boot_cmd : { *(.u_boot_cmd) }
++	__u_boot_cmd_end = .;
++
++	. = ALIGN(4);
++	__bss_start = .;
++	.bss : { *(.bss) }
++	_end = .;
++}
+diff -urN u-boot-1.1.6/common/env_common.c u-boot-1.1.6_lyb2440/common/env_common.c
+--- u-boot-1.1.6/common/env_common.c	2006-11-02 06:15:01.000000000 -0800
++++ u-boot-1.1.6_lyb2440/common/env_common.c	2019-11-23 22:56:51.479066018 -0800
+@@ -45,6 +45,7 @@
+ #endif
+ 
+ #undef DEBUG_ENV
++#define DEBUG_ENV
+ #ifdef DEBUG_ENV
+ #define DEBUGF(fmt,args...) printf(fmt ,##args)
+ #else
+diff -urN u-boot-1.1.6/common/main.c u-boot-1.1.6_lyb2440/common/main.c
+--- u-boot-1.1.6/common/main.c	2006-11-02 06:15:01.000000000 -0800
++++ u-boot-1.1.6_lyb2440/common/main.c	2019-11-23 23:11:50.324162003 -0800
+@@ -381,12 +381,11 @@
+ # endif
+ 	}
+ #endif /* CONFIG_PREBOOT */
+-
+ #if defined(CONFIG_BOOTDELAY) && (CONFIG_BOOTDELAY >= 0)
+ 	s = getenv ("bootdelay");
+ 	bootdelay = s ? (int)simple_strtol(s, NULL, 10) : CONFIG_BOOTDELAY;
+ 
+-	debug ("### main_loop entered: bootdelay=%d\n\n", bootdelay);
++	printf ("### main_loop entered: bootdelay=%d\n\n", bootdelay);
+ 
+ # ifdef CONFIG_BOOT_RETRY_TIME
+ 	init_cmd_timeout ();
+@@ -402,7 +401,7 @@
+ #endif /* CONFIG_BOOTCOUNT_LIMIT */
+ 		s = getenv ("bootcmd");
+ 
+-	debug ("### main_loop: bootcmd=\"%s\"\n", s ? s : "<UNDEFINED>");
++	printf ("### main_loop: bootcmd=\"%s\"\n", s ? s : "<UNDEFINED>");
+ 
+ 	if (bootdelay >= 0 && s && !abortboot (bootdelay)) {
+ # ifdef CONFIG_AUTOBOOT_KEYED
+diff -urN u-boot-1.1.6/common/miiphyutil.c u-boot-1.1.6_lyb2440/common/miiphyutil.c
+--- u-boot-1.1.6/common/miiphyutil.c	2006-11-02 06:15:01.000000000 -0800
++++ u-boot-1.1.6_lyb2440/common/miiphyutil.c	2019-11-23 22:55:18.951930738 -0800
+@@ -37,9 +37,9 @@
+ 
+ /* local debug macro */
+ #define MII_DEBUG
+-#undef MII_DEBUG
++//#undef MII_DEBUG
+ 
+-#undef debug
++//#undef debug
+ #ifdef MII_DEBUG
+ #define debug(fmt,args...)	printf (fmt ,##args)
+ #else
+diff -urN u-boot-1.1.6/cpu/arm920t/s3c24x0/speed.c u-boot-1.1.6_lyb2440/cpu/arm920t/s3c24x0/speed.c
+--- u-boot-1.1.6/cpu/arm920t/s3c24x0/speed.c	2006-11-02 06:15:01.000000000 -0800
++++ u-boot-1.1.6_lyb2440/cpu/arm920t/s3c24x0/speed.c	2019-11-22 22:25:27.894288558 -0800
+@@ -41,6 +41,8 @@
+ #define MPLL 0
+ #define UPLL 1
+ 
++DECLARE_GLOBAL_DATA_PTR;
++
+ /* ------------------------------------------------------------------------- */
+ /* NOTE: This describes the proper use of this file.
+  *
+@@ -66,8 +68,9 @@
+     m = ((r & 0xFF000) >> 12) + 8;
+     p = ((r & 0x003F0) >> 4) + 2;
+     s = r & 0x3;
+-
+-    return((CONFIG_SYS_CLK_FREQ * m) / (p << s));
++	
++	//参考S3C2440芯片手册上的公式：PLL=(2 * m * Fin)/(p * 2s)
++    return((CONFIG_SYS_CLK_FREQ * m * 2) / (p << s));
+ }
+ 
+ /* return FCLK frequency */
+@@ -76,22 +79,67 @@
+     return(get_PLLCLK(MPLL));
+ }
+ 
++#define S3C2440_CLKDIVN_PDIVN			(1<<0)
++#define S3C2440_CLKDIVN_HDIVN_MASK		(3<<1)
++#define S3C2440_CLKDIVN_HDIVN_1			(0<<1)
++#define S3C2440_CLKDIVN_HDIVN_2			(1<<1)
++#define S3C2440_CLKDIVN_HDIVN_4_8		(2<<1)
++#define S3C2440_CLKDIVN_HDIVN_3_6		(3<<1)
++
+ /* return HCLK frequency */
+ ulong get_HCLK(void)
+ {
+     S3C24X0_CLOCK_POWER * const clk_power = S3C24X0_GetBase_CLOCK_POWER();
++    unsigned long clkdiv = clk_power->CLKDIVN;
++    int hdiv = 1;
+ 
+-    return((clk_power->CLKDIVN & 0x2) ? get_FCLK()/2 : get_FCLK());
++    switch (clkdiv & S3C2440_CLKDIVN_HDIVN_MASK) {
++    case S3C2440_CLKDIVN_HDIVN_1:
++        hdiv = 1;
++        break;
++    case S3C2440_CLKDIVN_HDIVN_2:
++        hdiv = 2;
++        break;
++	case S3C2440_CLKDIVN_HDIVN_4_8://还需继续分辨
++        hdiv = 4;
++		break;
++	case S3C2440_CLKDIVN_HDIVN_3_6://还需继续分辨
++        hdiv = 3;
++		break;
++    }
++
++    return get_FCLK() / hdiv;
+ }
+ 
+ /* return PCLK frequency */
+ ulong get_PCLK(void)
+ {
+     S3C24X0_CLOCK_POWER * const clk_power = S3C24X0_GetBase_CLOCK_POWER();
++    unsigned long clkdiv;
++    int hdiv = 1;
++ 
++    clkdiv = clk_power->CLKDIVN;
++
++    switch (clkdiv & S3C2440_CLKDIVN_HDIVN_MASK) {
++    case S3C2440_CLKDIVN_HDIVN_1:
++        hdiv = 1;
++        break;
++
++    case S3C2440_CLKDIVN_HDIVN_2:
++        hdiv = 2;
++        break;
++	case S3C2440_CLKDIVN_HDIVN_4_8://还需继续分辨
++	    hdiv = 4;
++		break;
++	case S3C2440_CLKDIVN_HDIVN_3_6://还需继续分辨
++        hdiv = 3;
++		break;
++    }
+ 
+-    return((clk_power->CLKDIVN & 0x1) ? get_HCLK()/2 : get_HCLK());
++    return get_FCLK() / hdiv / ((clkdiv & S3C2440_CLKDIVN_PDIVN)? 2:1);    
+ }
+ 
++
+ /* return UCLK frequency */
+ ulong get_UCLK(void)
+ {
+diff -urN u-boot-1.1.6/cpu/arm920t/start.S u-boot-1.1.6_lyb2440/cpu/arm920t/start.S
+--- u-boot-1.1.6/cpu/arm920t/start.S	2006-11-02 06:15:01.000000000 -0800
++++ u-boot-1.1.6_lyb2440/cpu/arm920t/start.S	2019-11-22 21:20:42.861896174 -0800
+@@ -112,20 +112,24 @@
+ 	 * set the cpu to SVC32 mode
+ 	 */
+ 	mrs	r0,cpsr
+-	bic	r0,r0,#0x1f
++	bic	r0,r0,#0x1f //低五位清零
+ 	orr	r0,r0,#0xd3
+ 	msr	cpsr,r0
+ 
+ /* turn off the watchdog */
+-#if defined(CONFIG_S3C2400)
+-# define pWTCON		0x15300000
+-# define INTMSK		0x14400008	/* Interupt-Controller base addresses */
+-# define CLKDIVN	0x14800014	/* clock divisor register */
++#if defined(CONFIG_S3C2400) 
++#define pWTCON		0x15300000
++#define INTMSK		0x14400008	/* Interupt-Controller base addresses */
++#define CLKDIVN		0x14800014	/* clock divisor register */
++
+ #elif defined(CONFIG_S3C2410)
+-# define pWTCON		0x53000000
+-# define INTMSK		0x4A000008	/* Interupt-Controller base addresses */
+-# define INTSUBMSK	0x4A00001C
+-# define CLKDIVN	0x4C000014	/* clock divisor register */
++#define pWTCON		0x53000000
++#define INTMSK		0x4A000008	/* Interupt-Controller base addresses */
++#define INTSUBMSK	0x4A00001C
++#define CLKDIVN		0x4C000014	/* clock divisor register */
++#define LOCKTIME	0x4C000000	/* R/W, PLL lock time count register */
++#define MPLLCON		0x4C000004	/* R/W, MPLL configuration register */
++#define S3C2440_MPLL_400MHZ		((0x5c<<12)|(0x01<<4)|(0x01))
+ #endif
+ 
+ #if defined(CONFIG_S3C2400) || defined(CONFIG_S3C2410)
+@@ -139,17 +143,31 @@
+ 	mov	r1, #0xffffffff
+ 	ldr	r0, =INTMSK
+ 	str	r1, [r0]
+-# if defined(CONFIG_S3C2410)
+-	ldr	r1, =0x3ff
++	
++#if defined(CONFIG_S3C2410)	//添加s3c2440的中断禁止部分
++	ldr	r1, =0x7fff	//根据2440芯片手册，INTSUBMSK寄存器有15位可用
+ 	ldr	r0, =INTSUBMSK
+ 	str	r1, [r0]
+-# endif
++#endif
+ 
+-	/* FCLK:HCLK:PCLK = 1:2:4 */
+-	/* default FCLK is 120 MHz ! */
++	/* FCLK:HCLK:PCLK = 1:4:8 */
+ 	ldr	r0, =CLKDIVN
+-	mov	r1, #3
++	mov	r1, #5
+ 	str	r1, [r0]
++
++	mrc p15, 0, r1, c1, c0, 0		// read ctrl register 
++	orr r1, r1, #0xc0000000 		// Asynchronous	
++	mcr p15, 0, r1, c1, c0, 0		// write ctrl register
++
++    ldr r0,=LOCKTIME
++    ldr r1,=0xffffff
++    str r1,[r0]
++    
++
++    // Configure MPLL
++    ldr r0,=MPLLCON          
++    ldr r1,=S3C2440_MPLL_400MHZ
++    str r1,[r0]
+ #endif	/* CONFIG_S3C2400 || CONFIG_S3C2410 */
+ 
+ 	/*
+@@ -163,10 +181,9 @@
+ #ifndef CONFIG_SKIP_RELOCATE_UBOOT
+ relocate:				/* relocate U-Boot to RAM	    */
+ 	adr	r0, _start		/* r0 <- current position of code   */
+-	ldr	r1, _TEXT_BASE		/* test if we run from flash or RAM */
++	ldr	r1, _TEXT_BASE		/* test if we run from flash or RAM (TEXT_BASE = 0x33F80000)*/
+ 	cmp     r0, r1                  /* don't reloc during debug         */
+ 	beq     stack_setup
+-
+ 	ldr	r2, _armboot_start
+ 	ldr	r3, _bss_start
+ 	sub	r2, r3, r2		/* r2 <- size of armboot            */
+@@ -179,7 +196,22 @@
+ 	ble	copy_loop
+ #endif	/* CONFIG_SKIP_RELOCATE_UBOOT */
+ 
++
++	
++
+ 	/* Set up the stack						    */
++/* -------------------  0x3400,000
++** |	128k（uboot）  |
++** -------------------  <-- _TEXT_BASE(0x33F8,0000)
++** | CFG_MALLOC_LEN  |
++** -------------------
++** |CFG_GBL_DATA_SIZE|  gd info(128byte)
++** -------------------
++** |		12byte	 |
++** -------------------  <-- sp
++** |		...	 	 |
++** ------------------- 0x3000,0000
++*/
+ stack_setup:
+ 	ldr	r0, _TEXT_BASE		/* upper 128 KiB: relocated uboot   */
+ 	sub	r0, r0, #CFG_MALLOC_LEN	/* malloc area                      */
+@@ -189,6 +221,8 @@
+ #endif
+ 	sub	sp, r0, #12		/* leave 3 words for abort-stack    */
+ 
++
++	
+ clear_bss:
+ 	ldr	r0, _bss_start		/* find start of bss segment        */
+ 	ldr	r1, _bss_end		/* stop here                        */
+@@ -220,6 +254,15 @@
+ 	/* END stuff after relocation */
+ #endif
+ 
++	//点亮led测试	
++	//ldr r0, =0x56000050
++	//ldr r1, =0x00001500
++	//str r1, [r0]
++	
++	//ldr r0, =0x56000054
++	//ldr r1, =0
++	//str r1, [r0]
++
+ 	ldr	pc, _start_armboot
+ 
+ _start_armboot:	.word start_armboot
+diff -urN u-boot-1.1.6/include/asm-arm/mach-types.h u-boot-1.1.6_lyb2440/include/asm-arm/mach-types.h
+--- u-boot-1.1.6/include/asm-arm/mach-types.h	2006-11-02 06:15:01.000000000 -0800
++++ u-boot-1.1.6_lyb2440/include/asm-arm/mach-types.h	2019-11-22 03:29:08.250004511 -0800
+@@ -206,6 +206,8 @@
+ #define MACH_TYPE_FESTER               191
+ #define MACH_TYPE_GPI                  192
+ #define MACH_TYPE_SMDK2410             193
++#define MACH_TYPE_SMDK2440             799
++
+ #define MACH_TYPE_I519                 194
+ #define MACH_TYPE_NEXIO                195
+ #define MACH_TYPE_BITBOX               196
+diff -urN u-boot-1.1.6/include/configs/lyb2440.h u-boot-1.1.6_lyb2440/include/configs/lyb2440.h
+--- u-boot-1.1.6/include/configs/lyb2440.h	1969-12-31 16:00:00.000000000 -0800
++++ u-boot-1.1.6_lyb2440/include/configs/lyb2440.h	2019-11-23 22:19:59.406112905 -0800
+@@ -0,0 +1,181 @@
++/*
++ * (C) Copyright 2002
++ * Sysgo Real-Time Solutions, GmbH <www.elinos.com>
++ * Marius Groeger <mgroeger@sysgo.de>
++ * Gary Jennejohn <gj@denx.de>
++ * David Mueller <d.mueller@elsoft.ch>
++ *
++ * Configuation settings for the SAMSUNG SMDK2410 board.
++ *
++ * See file CREDITS for list of people who contributed to this
++ * project.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston,
++ * MA 02111-1307 USA
++ */
++
++#ifndef __CONFIG_H
++#define __CONFIG_H
++
++/*
++ * High Level Configuration Options
++ * (easy to change)
++ */
++#define CONFIG_ARM920T		1	/* This is an ARM920T Core	*/
++#define	CONFIG_S3C2410		1	/* in a SAMSUNG S3C2410 SoC     */
++#define CONFIG_SMDK2410		1	/* on a SAMSUNG SMDK2410 Board  */
++
++/* input clock of PLL */
++#define CONFIG_SYS_CLK_FREQ	12000000/* the SMDK2410 has 12MHz input clock */
++
++
++#define USE_920T_MMU		1
++#undef CONFIG_USE_IRQ			/* we don't need IRQ/FIQ stuff */
++
++/*
++ * Size of malloc() pool
++ */
++#define CFG_MALLOC_LEN		(CFG_ENV_SIZE + 128*1024)
++#define CFG_GBL_DATA_SIZE	128	/* size in bytes reserved for initial data */
++
++/*
++ * Hardware drivers
++ */
++#define CONFIG_DRIVER_CS8900	1	/* we have a CS8900 on-board */
++#define CS8900_BASE		0x19000300
++#define CS8900_BUS16		1 /* the Linux driver does accesses as shorts */
++
++/*
++ * select serial console configuration
++ */
++#define CONFIG_SERIAL1          1	/* we use SERIAL 1 on SMDK2410 */
++
++/************************************************************
++ * RTC
++ ************************************************************/
++#define	CONFIG_RTC_S3C24X0	1
++
++/* allow to overwrite serial and ethaddr */
++#define CONFIG_ENV_OVERWRITE
++
++#define CONFIG_BAUDRATE		115200
++
++/***********************************************************
++ * Command definition
++ ***********************************************************/
++#define CONFIG_COMMANDS \
++			(CONFIG_CMD_DFL	 | \
++			CFG_CMD_CACHE	 | \
++			/*CFG_CMD_NAND	 |*/ \
++			/*CFG_CMD_EEPROM |*/ \
++			/*CFG_CMD_I2C	 |*/ \
++			/*CFG_CMD_USB	 |*/ \
++			CFG_CMD_REGINFO  | \
++			CFG_CMD_DATE	 | \
++			CFG_CMD_ELF)
++
++/* this must be included AFTER the definition of CONFIG_COMMANDS (if any) */
++#include <cmd_confdefs.h>
++
++#define CONFIG_BOOTDELAY	3
++#define CONFIG_BOOTARGS    	"root=ramfs devfs=mount console=ttySA0,9600" 
++/*#define CONFIG_ETHADDR	08:00:3e:26:0a:5b */
++#define CONFIG_NETMASK          255.255.255.0
++#define CONFIG_IPADDR		10.0.0.110
++#define CONFIG_SERVERIP		10.0.0.1
++/*#define CONFIG_BOOTFILE	"elinos-lart" */
++/*#define CONFIG_BOOTCOMMAND	"tftp; bootm" */
++
++#if (CONFIG_COMMANDS & CFG_CMD_KGDB)
++#define CONFIG_KGDB_BAUDRATE	115200		/* speed to run kgdb serial port */
++/* what's this ? it's not used anywhere */
++#define CONFIG_KGDB_SER_INDEX	1		/* which serial port to use */
++#endif
++
++/*
++ * Miscellaneous configurable options
++ */
++#define	CFG_LONGHELP				/* undef to save memory		*/
++#define	CFG_PROMPT		"lyb2440 # "	/* Monitor Command Prompt	*/
++#define	CFG_CBSIZE		256		/* Console I/O Buffer Size	*/
++#define	CFG_PBSIZE (CFG_CBSIZE+sizeof(CFG_PROMPT)+16) /* Print Buffer Size */
++#define	CFG_MAXARGS		16		/* max number of command args	*/
++#define CFG_BARGSIZE		CFG_CBSIZE	/* Boot Argument Buffer Size	*/
++
++#define CFG_MEMTEST_START	0x30000000	/* memtest works on	*/
++#define CFG_MEMTEST_END		0x33F00000	/* 63 MB in DRAM	*/
++
++#undef  CFG_CLKS_IN_HZ		/* everything, incl board info, in Hz */
++
++#define	CFG_LOAD_ADDR		0x33000000	/* default load address	*/
++
++/* the PWM TImer 4 uses a counter of 15625 for 10 ms, so we need */
++/* it to wrap 100 times (total 1562500) to get 1 sec. */
++#define	CFG_HZ			1562500
++
++/* valid baudrates */
++#define CFG_BAUDRATE_TABLE	{ 9600, 19200, 38400, 57600, 115200 }
++
++/*-----------------------------------------------------------------------
++ * Stack sizes
++ *
++ * The stack sizes are set up in start.S using the settings below
++ */
++#define CONFIG_STACKSIZE	(128*1024)	/* regular stack */
++#ifdef CONFIG_USE_IRQ
++#define CONFIG_STACKSIZE_IRQ	(4*1024)	/* IRQ stack */
++#define CONFIG_STACKSIZE_FIQ	(4*1024)	/* FIQ stack */
++#endif
++
++/*-----------------------------------------------------------------------
++ * Physical Memory Map
++ */
++#define CONFIG_NR_DRAM_BANKS	1	   /* we have 1 bank of DRAM */
++#define PHYS_SDRAM_1		0x30000000 /* SDRAM Bank #1 */
++#define PHYS_SDRAM_1_SIZE	0x04000000 /* 64 MB */
++
++#define PHYS_FLASH_1		0x00000000 /* Flash Bank #1 */
++
++#define CFG_FLASH_BASE		PHYS_FLASH_1
++
++/*-----------------------------------------------------------------------
++ * FLASH and environment organization
++ */
++
++#define CONFIG_AMD_LV400	1	/* uncomment this if you have a LV400 flash */
++#if 0
++#define CONFIG_AMD_LV800	1	/* uncomment this if you have a LV800 flash */
++#endif
++
++#define CFG_MAX_FLASH_BANKS	1	/* max number of memory banks */
++#ifdef CONFIG_AMD_LV800
++#define PHYS_FLASH_SIZE		0x00100000 /* 1MB */
++#define CFG_MAX_FLASH_SECT	(19)	/* max number of sectors on one chip */
++#define CFG_ENV_ADDR		(CFG_FLASH_BASE + 0x0F0000) /* addr of environment */
++#endif
++#ifdef CONFIG_AMD_LV400
++#define PHYS_FLASH_SIZE		0x00080000 /* 512KB */
++#define CFG_MAX_FLASH_SECT	(11)	/* max number of sectors on one chip */
++#define CFG_ENV_ADDR		(CFG_FLASH_BASE + 0x070000) /* addr of environment */
++#endif
++
++/* timeout values are in ticks */
++#define CFG_FLASH_ERASE_TOUT	(5*CFG_HZ) /* Timeout for Flash Erase */
++#define CFG_FLASH_WRITE_TOUT	(5*CFG_HZ) /* Timeout for Flash Write */
++
++#define	CFG_ENV_IS_IN_FLASH	1
++#define CFG_ENV_SIZE		0x10000	/* Total Size of Environment Sector */
++
++#endif	/* __CONFIG_H */
+diff -urN u-boot-1.1.6/lib_arm/board.c u-boot-1.1.6_lyb2440/lib_arm/board.c
+--- u-boot-1.1.6/lib_arm/board.c	2006-11-02 06:15:01.000000000 -0800
++++ u-boot-1.1.6_lyb2440/lib_arm/board.c	2019-11-23 23:55:17.694824513 -0800
+@@ -233,6 +233,58 @@
+ 	NULL,
+ };
+ 
++void lyb_delay(volatile int d)
++{
++	while (d--);
++}
++
++#define	GPFCON 		(*(volatile unsigned int *)0x56000050)
++#define	GPFDAT  	(*(volatile unsigned int *)0x56000054)
++#define	GPHCON		(*(volatile unsigned int *)0x56000070)
++#define	GPHUP		(*(volatile unsigned int *)0x56000078)
++
++#define	UCON0		(*(volatile unsigned int *)0x50000004)
++#define	UBRDIV0		(*(volatile unsigned int *)0x50000028)
++#define	ULCON0		(*(volatile unsigned int *)0x50000000)
++#define	UTRSTAT0		(*(volatile unsigned int *)0x50000010)
++#define	UTXH0		(*(volatile unsigned int *)0x50000020)
++int led_test(void)
++{
++	int val = 0;  /* val: 0b000, 0b111 */
++	int tmp;
++	int i=50;
++
++	/* 设置GPFCON让GPF4/5/6配置为输出引脚 */
++	GPFCON &= ~((3<<8) | (3<<10) | (3<<12));
++	GPFCON |=  ((1<<8) | (1<<10) | (1<<12));
++
++	/* 循环点亮 */
++	while (--i)
++	{
++		tmp = ~val;
++		tmp &= 7;
++		GPFDAT &= ~(7<<4);
++		GPFDAT |= (tmp<<4);
++		lyb_delay(100000);
++		val++;
++		if (val == 8)
++			val =0;
++		
++	}
++
++	return 0;
++}
++
++int lyb_putchar(int c)
++{
++	/* UTRSTAT0 */
++	/* UTXH0 */
++
++	while (!(UTRSTAT0 & (1<<2)));
++	UTXH0 = (unsigned char)c;
++	return 0;
++}
++
+ void start_armboot (void)
+ {
+ 	init_fnc_t **init_fnc_ptr;
+@@ -244,23 +296,46 @@
+ 	unsigned long addr;
+ #endif
+ 
++	GPFCON &= ~((3<<8) | (3<<10) | (3<<12));
++	GPFCON |=  ((1<<8) | (1<<10) | (1<<12));
++	
+ 	/* Pointer is writable since we allocated a register for it */
+ 	gd = (gd_t*)(_armboot_start - CFG_MALLOC_LEN - sizeof(gd_t));
++	
+ 	/* compiler optimization barrier needed for GCC >= 3.4 */
+ 	__asm__ __volatile__("": : :"memory");
+-
+ 	memset ((void*)gd, 0, sizeof (gd_t));
++	GPFDAT &= ~(7<<4);
+ 	gd->bd = (bd_t*)((char*)gd - sizeof(bd_t));
++	GPFDAT |= 3<<4;
+ 	memset (gd->bd, 0, sizeof (bd_t));
+-
++	GPFDAT |= 7<<4;
+ 	monitor_flash_len = _bss_start - _armboot_start;
+ 
++/*
++	GPHCON &= ~((3<<4) | (3<<6));
++	GPHCON |= ((2<<4) | (2<<6));
++	GPHUP &= ~((1<<2) | (1<<3));  // 使能内部上拉 
++	UCON0 = 0x00000005; //PCLK,中断/查询模式 
++	UBRDIV0 = 26;
++
++	//设置数据格式 
++	ULCON0 = 0x00000003; // 8n1: 8个数据位, 无较验位, 1个停止位 
++
++	GPFDAT &= ~(7<<4);
++
++	lyb_putchar('l');
++	lyb_putchar('y');
++	lyb_putchar('b');*/
++	GPFDAT |= 1<<4;
++	
+ 	for (init_fnc_ptr = init_sequence; *init_fnc_ptr; ++init_fnc_ptr) {
+ 		if ((*init_fnc_ptr)() != 0) {
+ 			hang ();
+ 		}
+ 	}
+ 
++	led_test();
+ #ifndef CFG_NO_FLASH
+ 	/* configure available FLASH banks */
+ 	size = flash_init ();
+@@ -393,6 +468,8 @@
+ #endif
+ 	eth_initialize(gd->bd);
+ #endif
++	puts ("### main_loop enter ###\n");
++
+ 	/* main_loop() can return to retry autoboot, if so just run it again. */
+ 	for (;;) {
+ 		main_loop ();
+diff -urN u-boot-1.1.6/Makefile u-boot-1.1.6_lyb2440/Makefile
+--- u-boot-1.1.6/Makefile	2006-11-02 06:15:01.000000000 -0800
++++ u-boot-1.1.6_lyb2440/Makefile	2019-11-22 03:41:09.259798011 -0800
+@@ -1878,6 +1878,9 @@
+ 
+ smdk2410_config	:	unconfig
+ 	@$(MKCONFIG) $(@:_config=) arm arm920t smdk2410 NULL s3c24x0
++	
++lyb2440_config	:	unconfig
++	@$(MKCONFIG) $(@:_config=) arm arm920t lyb2440 NULL s3c24x0
+ 
+ SX1_config :		unconfig
+ 	@$(MKCONFIG) $(@:_config=) arm arm925t sx1
